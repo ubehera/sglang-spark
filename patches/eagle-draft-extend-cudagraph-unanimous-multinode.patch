@@ -1,0 +1,75 @@
+commit d3433cb09bad5cf8a4bcb9dfa10c84b1d1d5d2db
+Author: ubehera <ubehera@users.noreply.github.com>
+Date:   Fri May 29 00:36:24 2026 -0600
+
+    [GB10][spec] Make EAGLE draft-extend cudagraph build decision unanimous across TP ranks
+    
+    The draft-extend cudagraph runner runs a collective tp_group.barrier() per
+    batch size during capture, so it must be built on ALL TP ranks or NONE.
+    
+    On multi-node, single-GPU-per-node setups the per-rank draft-extend attention
+    backend can resolve differently (it derives from a current-device capability
+    probe), so one rank builds the runner and enters the collective barrier while
+    the peer skips it and proceeds to the scheduler event loop -> permanent init
+    deadlock (rank-0 idle in recv_requests broadcast, rank-1 blocked in
+    _capture_init barrier).
+    
+    Reconcile the build decision with a logical-AND (all_gather_object on the TP
+    cpu_group) so every rank builds the runner or none does. Observed on a 2-node
+    GB10 (sm_121a) cluster serving Qwen3.6-27B (hybrid GDN) with NEXTN k=3.
+
+diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
+index 8f406ad56..afe0d6b25 100644
+--- a/python/sglang/srt/speculative/eagle_worker_v2.py
++++ b/python/sglang/srt/speculative/eagle_worker_v2.py
+@@ -329,13 +329,45 @@ class EagleDraftWorker(BaseDraftWorker):
+             or isinstance(self.draft_extend_attn_backend, TRTLLMMLABackend)
+             or isinstance(self.draft_extend_attn_backend, TokenspeedMLABackend)
+         )
++        build_draft_extend_graph = bool(
++            self.draft_extend_attn_backend
++            and (
++                _is_npu
++                or supports_cuda_draft_extend_graph
++                or supports_hip_aiter_draft_extend_graph
++            )
++        )
++        # GB10 multi-node fix: the draft-extend cudagraph runner runs a collective
++        # tp_group.barrier() per batch size during capture, so it MUST be built on ALL
++        # TP ranks or NONE. The per-rank decision above can diverge across single-GPU-
++        # per-node ranks (the draft-extend attn backend type is resolved per rank from a
++        # current-device capability probe), which deadlocks init: one rank enters the
++        # collective capture while the other proceeds to the scheduler event loop. Make
++        # the decision unanimous (logical AND) across the TP group.
++        if self.draft_runner.tp_size > 1:
++            import torch.distributed as dist
++
++            _decisions = [None] * self.draft_runner.tp_size
++            dist.all_gather_object(
++                _decisions,
++                build_draft_extend_graph,
++                group=self.draft_runner.tp_group.cpu_group,
++            )
++            _agreed = all(bool(d) for d in _decisions)
++            if _agreed != build_draft_extend_graph:
++                logger.warning(
++                    "[draft-extend-cudagraph] cross-rank build decision diverged "
++                    "(local=%s gathered=%s -> agreed=%s); reconciled to avoid a "
++                    "collective-barrier deadlock. draft_extend_attn_backend=%s",
++                    build_draft_extend_graph,
++                    _decisions,
++                    _agreed,
++                    type(self.draft_extend_attn_backend).__name__,
++                )
++            build_draft_extend_graph = _agreed
+         # Capture extend
+         # TODO: support draft extend cuda graph for more attention backends
+-        if self.draft_extend_attn_backend and (
+-            _is_npu
+-            or supports_cuda_draft_extend_graph
+-            or supports_hip_aiter_draft_extend_graph
+-        ):
++        if build_draft_extend_graph:
+             tic = time.perf_counter()
+             before_mem = get_available_gpu_memory(self.device, self.gpu_id)
+             log_info_on_rank0(

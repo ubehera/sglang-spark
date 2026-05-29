@@ -49,6 +49,22 @@ git apply /path/to/sglang-spark/patches/weight_utils-multinode-fastsafetensors.p
 
 After applying, set `SGLANG_FASTSAFETENSORS_NOGDS=1` in the environment to enable the non-GDS path.
 
+## `eagle-draft-extend-cudagraph-unanimous-multinode.patch`
+
+**What it changes:** `python/sglang/srt/speculative/eagle_worker_v2.py` — in `EagleDraftWorker.init_cuda_graphs`, the decision to build the EAGLE draft-extend cudagraph runner is reconciled to a logical-AND across the TP group (`all_gather_object` on the TP `cpu_group`) before the build. The runner is now built on **all** TP ranks or **none**.
+
+**Why:** The draft-extend cudagraph runner runs a collective `tp_group.barrier()` per batch size during capture, so every TP rank must enter it together. But the per-rank build condition keys on the draft-extend attention backend *type*, which is resolved per rank from a current-device capability probe. On multinode single-GPU-per-node TP (e.g. NVIDIA DGX Spark / GB10), the two ranks can resolve different backends (one flashinfer, one triton) — so one rank builds the runner and enters the collective barrier while the peer skips it and proceeds to the scheduler event loop. Result: a permanent init deadlock (rank-0 idle in `recv_requests` broadcast, rank-1 blocked in `_capture_init` barrier); the server never becomes healthy. Pinning a single attention backend (e.g. `--attention-backend triton` for hybrid-GDN models) avoids the divergence, but this AND-reconcile makes the capture deadlock-proof regardless of how the per-rank backend resolves.
+
+**Apply when:** Running SGLang multinode TP with NEXTN/EAGLE speculative decoding on single-GPU-per-node hosts. Harmless otherwise (single rank, or already-agreeing ranks → no-op, no warning).
+
+**Upstream status:** GB10-discovered; candidate for upstream (the "collective capture must be unanimous across ranks" invariant is general). Not yet submitted.
+
+**Apply command:**
+```bash
+cd /path/to/sgl-project-sglang
+git apply /path/to/sglang-spark/patches/eagle-draft-extend-cudagraph-unanimous-multinode.patch
+```
+
 ## Verifying patches apply cleanly
 
 After updating the upstream SGLang source, dry-run each patch:
