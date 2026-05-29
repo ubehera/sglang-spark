@@ -24,9 +24,11 @@ leaving one rank up causes an NCCL hang) before a hard reset becomes necessary.
   wheel-NCCL-lacks-`sm_121` deadlock — use a custom `sm_121` NCCL build
   (`NCCL_HOME` in `spark-fabric.env`).
 - **Mitigation:** keep `--mem-fraction-static` ≤ 0.78. The watcher **gates** NVRM
-  signals for the first ~180 s after the unit goes `active`, because init
-  transients (KV pool, cudagraph capture, NEXTN draft load) emit the same
-  signature and retry successfully.
+  signals for the first ~600 s after the unit goes `active` — the grace must cover
+  the *full* cold load (weight load + Mamba/KV alloc + cudagraph capture + draft
+  load all emit benign NVRM retries). A grace tuned to one model false-positive-kills
+  a slower-loading one (observed 2026-05-28: a bf16 27B's Mamba alloc landed at ~190 s,
+  past a 180 s grace, and the watcher killed a healthy boot).
 
 ## 3. memcg rw-semaphore deadlock — terminal
 

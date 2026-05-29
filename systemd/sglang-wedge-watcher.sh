@@ -34,12 +34,16 @@ SGLANG_SPARK_ENV="${SGLANG_SPARK_ENV:-/etc/sglang-spark/spark-fabric.env}"
 
 PATTERNS='detokenizer for last [0-9]+ seconds|NVRM:.*Out of memory|hung_task.*sglang|blocked for more than [0-9]+ seconds.*sglang|memcg_rstat_updated'
 
-# Grace period after service enters `active` state before NVRM can fire.
-# Init transients have already happened by the time state==active, but a brief
-# settling window catches any post-active spikes during warmup.
-# Bumped from 60s on 2026-05-26: Mamba KV cache allocation for 35B-A3B-NVFP4
-# triggers NVRM-OOM-like signature at ~102s during boot.
-NVRM_GRACE_S=180
+# Grace period after the service enters `active` state before an NVRM "out of
+# memory" line can fire the watcher. It MUST cover the FULL cold-load window:
+# weight load + Mamba/KV allocation + draft-model load + cudagraph capture all
+# emit benign NVRM descriptor-retry lines on GB10 unified memory. A grace tuned
+# to one model's load time will FALSE-POSITIVE-KILL a slower-loading model
+# (observed 2026-05-28: a bf16 27B with a 161s weight-load hit the Mamba-alloc
+# NVRM at ~190s, past a 180s grace — the watcher killed a healthy boot). The
+# detokenizer-heartbeat / hung_task / memcg signals are NOT gated, so they still
+# catch real wedges inside this window.
+NVRM_GRACE_S=600
 
 STATE_DIR=/var/lib/sglang-watcher
 TRIGGER_LOG="$STATE_DIR/triggers.log"
