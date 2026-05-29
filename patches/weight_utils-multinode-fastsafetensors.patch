@@ -1,0 +1,80 @@
+commit d4e49159fea93b9adb01206561607e5321abd546
+Author: ubehera <ubehera@users.noreply.github.com>
+Date:   Thu May 28 12:07:21 2026 -0600
+
+    [Bugfix][ModelLoader] fastsafetensors: fix multinode device + add nogds opt-out
+    
+    Two related fixes in `fastsafetensors_weights_iterator`:
+    
+    1. Use `torch.cuda.current_device()` instead of the global TP rank as the
+       CUDA device index. With one GPU per node (cross-node TP=2 over
+       single-GPU hosts, e.g. NVIDIA DGX Spark / GB10), the global rank
+       exceeds the local GPU count: rank-1 resolves to `cuda:1`, which does
+       not exist on that node. Loading then fails with an obscure CUDA
+       device-not-found error mid-weight-load. Using the local device is
+       correct in both single-node and multi-node settings.
+    
+    2. Expose the fastsafetensors `nogds` knob via a new
+       `SGLANG_FASTSAFETENSORS_NOGDS` env var. fastsafetensors defaults to
+       GPU Direct Storage (cuFile), which requires kernel + filesystem
+       support. NFS, SMB, FUSE, and similar shared filesystems don't
+       support cuFile, so `loader.copy_files_to_device()` fails at the GDS
+       path. The non-GDS fallback streams through CPU memory and works on
+       any POSIX-readable backing. Default behavior is unchanged.
+    
+    Validated locally on cross-node TP=2 over NAS-mounted models on
+    GB10 / DGX Spark (1 GPU/node), where both bugs prevented model load.
+    
+    This consolidates two long-carried local patches.
+    
+    Co-authored-by: Claude <noreply@anthropic.com>
+
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 9821b2b73..0add21724 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -199,6 +199,10 @@ class Envs:
+     SGLANG_SORT_WEIGHT_FILES = EnvBool(False)
+     SGLANG_DISABLED_MODEL_ARCHS = EnvTuple(tuple())
+     SGLANG_PREFETCH_BLOCK_SIZE_MB = EnvInt(16)
++    # Force fastsafetensors to skip GPU Direct Storage (cuFile) and use
++    # the CPU-staged fallback. Required when models live on storage
++    # backends without cuFile support (NFS, SMB, FUSE).
++    SGLANG_FASTSAFETENSORS_NOGDS = EnvBool(False)
+ 
+     # Logging Options
+     SGLANG_LOG_GC = EnvBool(False)
+diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
+index 3373f2512..976165ae7 100644
+--- a/python/sglang/srt/model_loader/weight_utils.py
++++ b/python/sglang/srt/model_loader/weight_utils.py
+@@ -960,7 +960,19 @@ def fastsafetensors_weights_iterator(
+     except Exception:
+         rank = 0
+ 
+-    device = torch.device(f"cuda:{rank}")
++    # Use the current device on this process, not the global TP rank. With
++    # one GPU per node (e.g. multi-node TP=2 over single-GPU hosts), the
++    # global rank can exceed the local GPU count and `cuda:{rank}` resolves
++    # to a nonexistent device on non-rank-0 nodes.
++    device = torch.device(f"cuda:{torch.cuda.current_device()}")
++
++    # Allow disabling GPU Direct Storage. fastsafetensors defaults to GDS,
++    # which requires cuFile support in the underlying storage. NFS, SMB,
++    # FUSE, and similar shared filesystems often lack cuFile and fail at
++    # loader.copy_files_to_device() time.
++    from sglang.srt.environ import envs
++
++    nogds = envs.SGLANG_FASTSAFETENSORS_NOGDS.get()
+ 
+     weight_files_sub_lists = [
+         hf_weights_files[i : i + pg.size()]
+@@ -977,7 +989,7 @@ def fastsafetensors_weights_iterator(
+         disable=False,
+         bar_format=_BAR_FORMAT,
+     ):
+-        loader = SafeTensorsFileLoader(pg, device)
++        loader = SafeTensorsFileLoader(pg, device, nogds=nogds)
+         rank_file_map = {i: [f] for i, f in enumerate(f_list)}
+         loader.add_filenames(rank_file_map)
+         try:

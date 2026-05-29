@@ -1,0 +1,2 @@
+# sgl_kernel/sm100/common_ops.abi3.so gencode coverage (loaded on GB10 sm_121):
+sm_121a

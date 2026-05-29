@@ -1,0 +1,12 @@
+# Internal staging files — not for upstream
+PUBLISH_PLAN.md
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*~
+
+# Build artifacts (release wheels distributed via GH Releases, not git)
+*.whl
+*.tar.gz
+*.tar.zst

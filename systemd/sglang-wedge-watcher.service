@@ -1,0 +1,21 @@
+[Unit]
+Description=SGLang wedge-warning watcher (detokenizer heartbeat / NVRM OOM / hung_task)
+Documentation=https://github.com/ubehera/sglang-spark
+After=multi-user.target
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+# Adjust paths to your install (e.g. copy the repo to /opt/sglang-spark).
+# EnvironmentFile is optional ('-') — it supplies SGLANG_PEER_HOST / SGLANG_SSH_USER
+# for multi-Spark peer-stop; unneeded on a single Spark.
+EnvironmentFile=-/etc/sglang-spark/spark-fabric.env
+ExecStart=/bin/bash /opt/sglang-spark/systemd/sglang-wedge-watcher.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
