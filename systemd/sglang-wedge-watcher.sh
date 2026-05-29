@@ -141,7 +141,47 @@ journalctl -f --no-pager --since=now 2>/dev/null \
       else
         log "WARN: unknown local hostname, cannot stop peer; TP=2 partner may hang"
       fi
-      log "stopped $svc (local+peer); exiting (systemd will restart watcher with fresh --since=now)"
+      log "stopped $svc (local+peer)"
+
+      # --- Self-healing: auto-restart so a transient wedge becomes a brief blip
+      # instead of indefinite downtime (a stopped-but-never-restarted service stays
+      # silently down until someone notices). Loop-guarded: at most AUTO_RESTART_MAX
+      # restarts within AUTO_RESTART_WINDOW_S; beyond that, stay DOWN and require
+      # manual intervention (prevents a stall->restart->stall loop on a broken state).
+      AUTO_RESTART_MAX="${AUTO_RESTART_MAX:-3}"
+      AUTO_RESTART_WINDOW_S="${AUTO_RESTART_WINDOW_S:-1800}"
+      RECLAIM_DELAY_S="${RECLAIM_DELAY_S:-30}"
+      AR_LOG="$STATE_DIR/autorestart.log"
+      now_s=$(date +%s)
+      recent=0
+      if [ -f "$AR_LOG" ]; then
+        while IFS= read -r ts; do
+          [ -n "$ts" ] && [ "$((now_s - ts))" -lt "$AUTO_RESTART_WINDOW_S" ] && recent=$((recent + 1))
+        done < "$AR_LOG"
+      fi
+      if [ "$recent" -ge "$AUTO_RESTART_MAX" ]; then
+        log "AUTO-RESTART SUPPRESSED: $recent in last ${AUTO_RESTART_WINDOW_S}s (>= $AUTO_RESTART_MAX); leaving $svc DOWN for manual intervention"
+        printf '%s\tSUPPRESSED\t%s\n' "$(date -Iseconds)" "$svc" >> "$TRIGGER_LOG"
+      else
+        echo "$now_s" >> "$AR_LOG"
+        log "auto-restart: drop_caches + ${RECLAIM_DELAY_S}s reclaim wait (attempt $((recent + 1))/$AUTO_RESTART_MAX in window)"
+        sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+        if [ -n "$peer" ]; then
+          runuser -u "${SGLANG_SSH_USER:?set SGLANG_SSH_USER}" -- ssh -o ConnectTimeout=5 -o BatchMode=yes "$peer" "sync; echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null" 2>/dev/null
+        fi
+        sleep "$RECLAIM_DELAY_S"
+        log "auto-restart: starting $svc locally"
+        systemctl reset-failed "$svc" 2>/dev/null || true
+        systemctl start --no-block "$svc" || log "WARN: local start of $svc failed"
+        if [ -n "$peer" ]; then
+          log "auto-restart: starting $svc on peer $peer"
+          runuser -u "${SGLANG_SSH_USER:?set SGLANG_SSH_USER}" -- ssh -o ConnectTimeout=5 -o BatchMode=yes "$peer" "sudo -n systemctl reset-failed $svc 2>/dev/null; sudo -n systemctl start --no-block $svc" \
+            || log "WARN: peer start on $peer failed; TP=2 partner may be down"
+        fi
+        log "auto-restart: issued for $svc (local+peer)"
+      fi
+
+      log "exiting (systemd restarts watcher with fresh --since=now)"
       exit 0
     done
 
