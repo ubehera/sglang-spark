@@ -8,13 +8,13 @@ v<sgl-kernel-version>+sm121a-<YYYY-MM-DD>
 
 ## [v0.4.4+sm121a-2026-06-21] — 2026-06-21
 
-Refresh against current upstream. Rebases the GB10 patch stack onto a newer SGLang `main` and the upstream `sgl-kernel 0.4.4` line; adds three speculative-decoding / diagnostics patches surfaced while chasing the cross-node NEXTN decode-sync stall, plus the dual-rank capture script. No wheel rebuilt in this entry — rebuild from these patches to produce `0.4.4+sm121a`.
+Refresh against current upstream. Rebases the GB10 patch stack onto a newer SGLang `main` and the upstream `sgl-kernel 0.4.4` line; adds three speculative-decoding / diagnostics patches surfaced while chasing the cross-node NEXTN decode-sync stall, plus the dual-rank capture script. The `0.4.4+sm121a` wheel WAS built and validated: sha256 `04ea8e3509f9f47687d6afcdcb757cab37f756ed4fe48c19ea35e5536ce2685e` (7.3M); `cuobjdump --list-elf` shows the bundled `.so` carry **sm_121a only** (no sm_90/sm_100/sm_120a); single-GB10 runtime smoke (TP=1, triton) PASS with cudagraph capture+replay. Shipped as the release asset; checksum in `SHA256SUMS`.
 
 ### Provenance
 
-- Refreshed against SGLang `main` HEAD `73448b0d7` (June 2026).
+- Refreshed against SGLang `main` HEAD `e2540188c` (June 2026).
 - Upstream `sgl-kernel` is now `0.4.4` (was `0.4.3` at the initial release). The version patch tags the local build `0.4.4+sm121a`.
-- All `patches/*.patch` re-verified to `git apply --check` cleanly, both independently and stacked, against `73448b0d7`.
+- All `patches/*.patch` re-verified to `git apply --check` cleanly, both independently and stacked, against `e2540188c`.
 
 ### Added
 
@@ -26,7 +26,7 @@ Refresh against current upstream. Rebases the GB10 patch stack onto a newer SGLa
 ### Changed
 
 - `patches/sgl-kernel-version-sm121a.patch` — bumped `0.4.3` → `0.4.4` (now tags the wheel `0.4.4+sm121a` against upstream `sgl-kernel 0.4.4`).
-- `patches/weight_utils-multinode-fastsafetensors.patch`, `patches/sgl-kernel-cmakelists-sm121a-only.patch`, `patches/eagle-draft-extend-cudagraph-unanimous-multinode.patch` — regenerated from the rebased commits so they apply cleanly to HEAD `73448b0d7`.
+- `patches/weight_utils-multinode-fastsafetensors.patch`, `patches/sgl-kernel-cmakelists-sm121a-only.patch`, `patches/eagle-draft-extend-cudagraph-unanimous-multinode.patch` — regenerated from the rebased commits so they apply cleanly to HEAD `e2540188c`.
 - `scripts/launch/tp2-moe-fp8-nospec.sh`, `tp2-moe-nvfp4-mtp.sh`, `tp2-dense-bf16-mtp.sh` — `--tp 2` → `--tp-size 2`. The abbreviated `--tp` relies on argparse prefix-matching and would become ambiguous (and crash at launch) if upstream adds another `--tp*` option; `--tp-size` is the unambiguous canonical flag.
 
 ### Known limitations
