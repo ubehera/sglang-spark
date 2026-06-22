@@ -56,7 +56,7 @@ exec python -m sglang.launch_server \
   --served-model-name "${SERVED_NAME:-$MODEL_REPO}" \
   --host 0.0.0.0 --port "${SGLANG_PORT:-30000}" \
   --api-key "$KEY" \
-  --tp 2 --nnodes 2 --node-rank "$NODE_RANK" \
+  --tp-size 2 --nnodes 2 --node-rank "$NODE_RANK" \
   --dist-init-addr "${SGLANG_HEAD_IP:?set SGLANG_HEAD_IP in spark-fabric.env}:${SGLANG_DIST_PORT:-25000}" \
   --context-length "${SGLANG_CONTEXT_LEN:-16384}" \
   --mem-fraction-static 0.78 \

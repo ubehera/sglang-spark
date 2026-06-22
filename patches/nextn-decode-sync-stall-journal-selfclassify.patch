@@ -1,0 +1,126 @@
+commit 28c23c72b98fa9f1ee7e6b80936ef50bb0be5260
+Author: ubehera <ubehera@users.noreply.github.com>
+Date:   Fri May 29 22:21:32 2026 -0600
+
+    [GB10][spec][diag] Self-classify cross-node NEXTN decode-sync stall in journal
+    
+    The cross-node TP=2 Qwen3.6-27B NEXTN service trips the /health detokenizer
+    heartbeat under sustained think-on load (and at low concurrency: standing
+    single-stream stalls). Traced from source: the heartbeat is
+    tokenizer_manager.last_receive_tstamp (http_server health_generate), refreshed
+    only when a scheduler iteration produces output OR the busy-path health-check
+    backstop fires (scheduler.maybe_send_health_check_signal). BOTH run only AFTER
+    process_batch_result_decode -> copy_done.synchronize() (batch_result_processor).
+    That synchronize is a node-local CPU wait on a CUDA event recorded after the
+    whole verify/draft/draft_extend forward (+async D2H) on the forward stream, so if
+    a TP collective baked into that forward stalls on one rank the wait never
+    returns, the iteration never reaches the heartbeat emit, and /health trips. It is
+    NOT a slow detok thread (refuted: detok only acts on messages the scheduler
+    sends; during the block zero are sent).
+    
+    What could NOT be confirmed from source: WHICH cross-rank divergence makes the
+    wait block. The steady-state decode path (draft->verify->draft_extend) has no
+    Python-level conditional collective that can diverge in replicated TP=2; the
+    d3433cb09 init-time draft-extend cudagraph divergence is already built into the
+    running copy, and can_run()/replay() are batch-shape decisions that are symmetric
+    when the batch is replicated. So a confident root-cause patch needs a live
+    dual-rank py-spy at a reproduced stall first.
+    
+    This change is that capture, automated: when
+    SGLANG_DEBUG_SPEC_DECODE_SYNC_WARN_SECS > 0, poll copy_done non-blockingly and
+    log (with tp_rank, bs, forward_ct) when the decode sync exceeds the threshold,
+    then log RECOVERED if it completes -- distinguishing a SLOW sync from a hard
+    cross-rank deadlock (event never completes) directly in the journal. Default 0.0
+    = unchanged blocking synchronize. Feature-preserving (NEXTN/cudagraph/mamba/
+    multimodal untouched) and cross-rank SYMMETRIC (identical code per rank, event +
+    poll node-local, no collective added/moved/gated -> cannot itself desync, per the
+    d3433cb09 lesson). Env var registered per env-var-conventions (DEBUG_ prefix).
+
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 68e6a0981..a4665f0c0 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -651,6 +651,14 @@ class Envs:
+     # extend_attention_fwd for unsupported cases or when set false (e.g. for
+     # debugging). Correctness is unaffected; this only changes performance.
+     SGLANG_ENABLE_SPLITKV_VERIFY = EnvBool(True)
++    # [GB10] Debug instrumentation for cross-node TP=2 NEXTN stalls. When > 0,
++    # the decode-path D2H sync (process_batch_result_decode -> copy_done) polls
++    # the CUDA event non-blockingly and logs an ERROR every time the wait exceeds
++    # this many seconds, then logs a RECOVERED line if it completes. Lets a live
++    # stall self-classify in the journal as a SLOW sync vs a hard cross-rank
++    # collective deadlock (event never completes) without needing to catch a
++    # py-spy in the act. 0 = off (plain blocking synchronize, prod default).
++    SGLANG_DEBUG_SPEC_DECODE_SYNC_WARN_SECS = EnvFloat(0.0)
+     # Master switch for all async-asserted invariant probes (NaN, Inf, OOB,
+     # page alignment). Off in prod; tests turn it on to fail-fast on
+     # numerical / index violations instead of getting silent NaN cascades.
+diff --git a/python/sglang/srt/managers/scheduler_components/batch_result_processor.py b/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
+index a9d5f0c28..5266295e9 100644
+--- a/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
++++ b/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
+@@ -639,7 +639,63 @@ class SchedulerBatchResultProcessor:
+         result: GenerationBatchResult,
+     ):
+         if result.copy_done is not None:
+-            result.copy_done.synchronize()
++            # [GB10][spec][diag] Instrument the decode-path D2H sync so a
++            # cross-node TP=2 NEXTN stall is self-diagnosing in the journal.
++            #
++            # copy_done is a CUDA event recorded (utils.py copy_to_cpu ->
++            # copy_done.record()) AFTER this iteration's verify/draft/draft_extend
++            # GPU work + async D2H copies on the forward stream. synchronize()
++            # therefore CPU-blocks until ALL of that drains. If a TP collective
++            # baked into the (cudagraph-replayed or eager) draft/verify/draft_extend
++            # forward stalls on one rank, this wait never returns -> the scheduler
++            # event loop never reaches maybe_send_health_check_signal()
++            # (scheduler.process_batch_result) and never emits output, so
++            # tokenizer_manager.last_receive_tstamp goes stale and the /health
++            # check (http_server) trips with "couldn't get a response from
++            # detokenizer". This is NOT a slow detok thread.
++            #
++            # We poll the event non-blockingly to tell a SLOW sync (query() goes
++            # True after N s) apart from a true cross-rank DEADLOCK (query() stays
++            # False indefinitely while the peer rank is parked in NCCL). This is
++            # feature-preserving and cross-rank SYMMETRIC: every TP rank runs the
++            # identical code, the event/poll are node-local, and the eventual
++            # synchronize() is unchanged -- no collective is added, moved, or
++            # gated, so it cannot itself desync the ranks (the d3433cb09 lesson).
++            warn_after_s = envs.SGLANG_DEBUG_SPEC_DECODE_SYNC_WARN_SECS.get()
++            if warn_after_s > 0:
++                import time as _time
++
++                _t0 = _time.monotonic()
++                _warned = False
++                while not result.copy_done.query():
++                    if (
++                        not _warned
++                        and (_elapsed := _time.monotonic() - _t0) >= warn_after_s
++                    ):
++                        logger.error(
++                            "[spec-decode-sync] decode copy_done not complete "
++                            "after %.1fs (tp_rank=%s bs=%s forward_ct=%s spec_v2=%s). "
++                            "If this line repeats with no peer progress the forward "
++                            "stream is blocked on a cross-rank collective (NEXTN "
++                            "verify/draft_extend) -> heartbeat will go stale. "
++                            "py-spy BOTH ranks NOW.",
++                            _elapsed,
++                            getattr(self.model_worker, "tp_rank", "?"),
++                            batch.batch_size(),
++                            getattr(self.metrics_reporter, "forward_ct_decode", "?"),
++                            batch.is_spec_v2,
++                        )
++                        _warned = True
++                    _time.sleep(0.5)
++                if _warned:
++                    logger.error(
++                        "[spec-decode-sync] decode copy_done RECOVERED after %.1fs "
++                        "(tp_rank=%s) -- this was a SLOW sync, not a hard deadlock.",
++                        _time.monotonic() - _t0,
++                        getattr(self.model_worker, "tp_rank", "?"),
++                    )
++            else:
++                result.copy_done.synchronize()
+         if result.routed_experts_output is not None:
+             result.routed_experts_output.finalize()
+             result.routed_experts_output = None

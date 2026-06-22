@@ -1,20 +1,20 @@
 diff --git a/sgl-kernel/pyproject.toml b/sgl-kernel/pyproject.toml
-index cb2877fe4..a09da86f6 100644
+index 1b6ff11c1..8174a53dd 100644
 --- a/sgl-kernel/pyproject.toml
 +++ b/sgl-kernel/pyproject.toml
 @@ -8,7 +8,7 @@ build-backend = "scikit_build_core.build"
  
  [project]
  name = "sglang-kernel"
--version = "0.4.3"
-+version = "0.4.3+sm121a"
+-version = "0.4.4"
++version = "0.4.4+sm121a"
  authors = [
    { name="SGLang Kernel Team", email="sglang@lmsys.org" },
  ]
 diff --git a/sgl-kernel/python/sgl_kernel/version.py b/sgl-kernel/python/sgl_kernel/version.py
-index f6b7e267c..50de1b765 100644
+index cd1ee63b7..3cf56ebf5 100644
 --- a/sgl-kernel/python/sgl_kernel/version.py
 +++ b/sgl-kernel/python/sgl_kernel/version.py
 @@ -1 +1 @@
--__version__ = "0.4.3"
-+__version__ = "0.4.3+sm121a"
+-__version__ = "0.4.4"
++__version__ = "0.4.4+sm121a"

@@ -1,0 +1,49 @@
+commit 264eac005947814c274e05fdde245855d077876c
+Author: ubehera <ubehera@users.noreply.github.com>
+Date:   Mon Jun 1 18:36:03 2026 +0000
+
+    [GB10][ModelLoader] Honor weight_loader_drop_cache_after_load on the fastsafetensors path
+    
+    fastsafetensors_weights_iterator silently ignored --weight-loader-drop-cache-after-load:
+    the drop_cache_after_load param + posix_fadvise(DONTNEED) call existed only on the
+    safetensors / multi-thread iterators. Thread the param through and fadvise each shard
+    after copy_files_to_device, matching the sibling iterators. Off by default; no behavior
+    change unless the flag is set.
+    
+    Note: this does NOT change KV-pool sizing on integrated GPUs -- get_available_gpu_memory
+    reads MemAvailable, which already counts reclaimable page cache as available (verified).
+
+diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
+index edf06cb3e..7927d95e6 100644
+--- a/python/sglang/srt/model_loader/loader.py
++++ b/python/sglang/srt/model_loader/loader.py
+@@ -576,6 +576,7 @@ class DefaultModelLoader(BaseModelLoader):
+             if self.load_config.load_format == LoadFormat.FASTSAFETENSORS:
+                 weights_iterator = fastsafetensors_weights_iterator(
+                     hf_weights_files,
++                    drop_cache_after_load=weight_loader_drop_cache_after_load,
+                 )
+             elif use_multithread:
+                 weights_iterator = buffered_multi_thread_safetensors_weights_iterator(
+diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
+index a2bd43846..6a902a9de 100644
+--- a/python/sglang/srt/model_loader/weight_utils.py
++++ b/python/sglang/srt/model_loader/weight_utils.py
+@@ -944,6 +944,7 @@ def safetensors_weights_iterator(
+ 
+ def fastsafetensors_weights_iterator(
+     hf_weights_files: List[str],
++    drop_cache_after_load: bool = False,
+ ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+     """
+     Iterate over the weights in the model safetensor files
+@@ -1007,6 +1008,9 @@ def fastsafetensors_weights_iterator(
+                 pass
+         finally:
+             loader.close()
++        if drop_cache_after_load:
++            for _f in f_list:
++                _drop_file_cache_after_load(_f)
+ 
+ 
+ def multi_thread_safetensors_weights_iterator(

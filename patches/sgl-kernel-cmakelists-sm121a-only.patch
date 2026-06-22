@@ -1,18 +1,43 @@
+commit 1153944e121216801a152a3fe9080a8274780127
+Author: ubehera <umankshree@gmail.com>
+Date:   Thu May 28 19:34:23 2026 -0600
+
+    [Build][GB10] sgl-kernel: true sm_121a-only build (disable FA3 + FlashMLA)
+    
+    GB10/DGX Spark (sm_121a) local build. Reduces the kernel to only the arch
+    that runs on this box, cutting build time, peak memory, and .so size:
+    
+    - SM100A gencode list: 6 gencodes -> sm_121a only (+ --compress-mode=size)
+    - Base SGL_KERNEL_CUDA_FLAGS: drop the unconditional compute_90/sm_90 gencode
+    - CUDA_ARCHITECTURES OFF on common_ops sm90/sm100 targets so only the explicit
+      sm_121a flag applies
+    - SGL_KERNEL_ENABLE_FA3 left OFF: flash_ops is 252 Hopper sm_90a instantiations
+      that cannot run on sm_121a and are never selected (triton/flashinfer only)
+    - FlashMLA include skipped: flashmla_ops builds sm_100a/103a/90a (no sm_121a)
+      and only serves DeepSeek-MLA models (use_mla_backend=True), which we don't run
+    
+    Result: package = common_ops (sm90/sm100) + spatial_ops, all sm_121a-only.
+    NVFP4 stays enabled (ENABLE_NVFP4 via CUDA>=12.8). sglang imports cleanly
+    (flash_attn/flash_mla are try/except optional).
+    
+    NOT for upstream. Re-enable FA3/FlashMLA + add sm_121a if serving Hopper FA3
+    or DeepSeek-MLA models.
+
 diff --git a/sgl-kernel/CMakeLists.txt b/sgl-kernel/CMakeLists.txt
-index 86d315783..e30933d7b 100644
+index 99015ff18..0c44ee54b 100644
 --- a/sgl-kernel/CMakeLists.txt
 +++ b/sgl-kernel/CMakeLists.txt
-@@ -127,7 +127,8 @@ set(SGL_KERNEL_CUDA_FLAGS
+@@ -124,7 +124,8 @@ set(SGL_KERNEL_CUDA_FLAGS
      "-O3"
      "-Xcompiler"
      "-fPIC"
 -    "-gencode=arch=compute_90,code=sm_90"
-+    # base sm_90 gencode dropped for GB10 sm_121a-only build (ubehera 2026-05-28);
++    # base sm_90 gencode dropped for GB10 sm_121a-only build (umankb 2026-05-28);
 +    # sm_121a comes from the SM100A block below (CUDA_VERSION>=12.8 path).
      "-std=c++17"
      "-DFLASHINFER_ENABLE_F16"
      "-DCUTE_USE_PACKED_TUPLE=1"
-@@ -139,10 +140,11 @@ set(SGL_KERNEL_CUDA_FLAGS
+@@ -136,10 +137,11 @@ set(SGL_KERNEL_CUDA_FLAGS
      "--expt-relaxed-constexpr"
      "--expt-extended-lambda"
  
@@ -28,7 +53,7 @@ index 86d315783..e30933d7b 100644
  
      # Supress warnings
      "-Xcompiler=-Wno-clang-format-violations"
-@@ -159,7 +161,7 @@ set(SGL_KERNEL_CUDA_FLAGS
+@@ -156,7 +158,7 @@ set(SGL_KERNEL_CUDA_FLAGS
      # "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
  )
  
@@ -37,11 +62,11 @@ index 86d315783..e30933d7b 100644
  
  # When SGL_KERNEL_COMPILE_THREADS value is less than 1, set it to 1
  if (NOT SGL_KERNEL_COMPILE_THREADS MATCHES "^[0-9]+$")
-@@ -208,36 +210,21 @@ if (ENABLE_BELOW_SM90)
+@@ -205,31 +207,19 @@ if (ENABLE_BELOW_SM90)
  endif()
  
  if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8" OR SGL_KERNEL_ENABLE_SM100A)
-+    # GB10/sm_121a-only patch (ubehera 2026-05-18): strip non-target gencodes to slash build time/memory
++    # GB10/sm_121a-only patch (umankb 2026-05-18): strip non-target gencodes to slash build time/memory
 +    # Original list contained: sm_100a, sm_120a, sm_103a, sm_110a, sm_121a, sm_90a (6 gencodes).
      list(APPEND SGL_KERNEL_CUDA_FLAGS
 -        "-gencode=arch=compute_100a,code=sm_100a"
@@ -70,21 +95,15 @@ index 86d315783..e30933d7b 100644
 -    endif()
  endif()
  
- if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4")
--    set(SGL_KERNEL_ENABLE_FA3 ON)
--    list(APPEND SGL_KERNEL_CUDA_FLAGS
--        "-gencode=arch=compute_90a,code=sm_90a"
--    )
-+    # FA3 (flash_ops) DISABLED for GB10 sm_121a-only build (ubehera 2026-05-28):
-+    # flash_ops is 252 Hopper sm_90a instantiations that cannot execute on sm_121a
-+    # and are never selected (we use triton/flashinfer, never --attention-backend fa3).
-+    # Re-enable (set ON) only if you need the fa3/dual_chunk attention backend on Hopper.
-+    # set(SGL_KERNEL_ENABLE_FA3 ON)
-+    # sm_90a gencode dropped for GB10-only build (ubehera 2026-05-18)
- endif()
- 
- if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8" OR SGL_KERNEL_ENABLE_FP4)
-@@ -340,6 +327,7 @@ target_include_directories(common_ops_sm90_build PRIVATE ${INCLUDES})
++# FA3 (flash_ops) stays OFF on GB10/aarch64: DEFAULT_SGL_KERNEL_ENABLE_FA3 is OFF
++# by default on aarch64 (set above), so the sm_90a gencode below is NOT appended on
++# this box -- flash_ops is 252 Hopper sm_90a instantiations that cannot run on sm_121a
++# and are never selected (we use triton/flashinfer, never --attention-backend fa3).
++# Re-enable by building with -DSGL_KERNEL_ENABLE_FA3=ON only if serving FA3 on Hopper.
+ if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4" AND SGL_KERNEL_ENABLE_FA3)
+     list(APPEND SGL_KERNEL_CUDA_FLAGS
+         "-gencode=arch=compute_90a,code=sm_90a"
+@@ -334,6 +324,7 @@ target_include_directories(common_ops_sm90_build PRIVATE ${INCLUDES})
  set_target_properties(common_ops_sm90_build PROPERTIES
      OUTPUT_NAME "common_ops"
      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/sm90"
@@ -92,7 +111,7 @@ index 86d315783..e30933d7b 100644
  )
  
  # =========================== Common SM100+ Build ============================= #
-@@ -354,6 +342,7 @@ target_include_directories(common_ops_sm100_build PRIVATE ${INCLUDES})
+@@ -348,6 +339,7 @@ target_include_directories(common_ops_sm100_build PRIVATE ${INCLUDES})
  set_target_properties(common_ops_sm100_build PROPERTIES
      OUTPUT_NAME "common_ops"
      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/sm100"
@@ -100,12 +119,12 @@ index 86d315783..e30933d7b 100644
  )
  
  find_package(Python3 COMPONENTS Interpreter REQUIRED)
-@@ -505,7 +494,11 @@ target_link_libraries(spatial_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda)
+@@ -490,7 +482,11 @@ target_link_libraries(spatial_ops PRIVATE ${TORCH_LIBRARIES} c10 cuda)
  install(TARGETS spatial_ops LIBRARY DESTINATION sgl_kernel)
  
  # ============================ Extra Install: FLashMLA ============================= #
 -include(${CMAKE_CURRENT_LIST_DIR}/cmake/flashmla.cmake)
-+# FlashMLA (flashmla_ops) DISABLED for GB10 sm_121a-only build (ubehera 2026-05-28):
++# FlashMLA (flashmla_ops) DISABLED for GB10 sm_121a-only build (umankb 2026-05-28):
 +# builds sm_100a/103a/90a cubins (no sm_121a) and is gated on use_mla_backend=True,
 +# i.e. DeepSeek-MLA-class models only, which we do not run. Re-enable the include and
 +# add sm_121a to cmake/flashmla.cmake if you ever serve a DeepSeek-MLA model on GB10.

@@ -1,5 +1,5 @@
-commit d4e49159fea93b9adb01206561607e5321abd546
-Author: ubehera <ubehera@users.noreply.github.com>
+commit 2dc214e645215baba8d9b474f465d860e14bf66d
+Author: ubehera <umankshree@gmail.com>
 Date:   Thu May 28 12:07:21 2026 -0600
 
     [Bugfix][ModelLoader] fastsafetensors: fix multinode device + add nogds opt-out
@@ -30,13 +30,13 @@ Date:   Thu May 28 12:07:21 2026 -0600
     Co-authored-by: Claude <noreply@anthropic.com>
 
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 9821b2b73..0add21724 100644
+index 331d8eb3a..68e6a0981 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -199,6 +199,10 @@ class Envs:
-     SGLANG_SORT_WEIGHT_FILES = EnvBool(False)
+@@ -207,6 +207,10 @@ class Envs:
      SGLANG_DISABLED_MODEL_ARCHS = EnvTuple(tuple())
      SGLANG_PREFETCH_BLOCK_SIZE_MB = EnvInt(16)
+     SGLANG_GEMMA_OUT_OF_PLACE_POSITION_MUTATION = EnvBool(False)
 +    # Force fastsafetensors to skip GPU Direct Storage (cuFile) and use
 +    # the CPU-staged fallback. Required when models live on storage
 +    # backends without cuFile support (NFS, SMB, FUSE).
@@ -45,10 +45,10 @@ index 9821b2b73..0add21724 100644
      # Logging Options
      SGLANG_LOG_GC = EnvBool(False)
 diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
-index 3373f2512..976165ae7 100644
+index afd17dc16..a2bd43846 100644
 --- a/python/sglang/srt/model_loader/weight_utils.py
 +++ b/python/sglang/srt/model_loader/weight_utils.py
-@@ -960,7 +960,19 @@ def fastsafetensors_weights_iterator(
+@@ -964,7 +964,19 @@ def fastsafetensors_weights_iterator(
      except Exception:
          rank = 0
  
@@ -69,7 +69,7 @@ index 3373f2512..976165ae7 100644
  
      weight_files_sub_lists = [
          hf_weights_files[i : i + pg.size()]
-@@ -977,7 +989,7 @@ def fastsafetensors_weights_iterator(
+@@ -981,7 +993,7 @@ def fastsafetensors_weights_iterator(
          disable=False,
          bar_format=_BAR_FORMAT,
      ):

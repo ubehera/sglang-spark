@@ -1,4 +1,4 @@
-commit d3433cb09bad5cf8a4bcb9dfa10c84b1d1d5d2db
+commit 57717eaf37ad0887662f769e198c24f095ee6959
 Author: ubehera <ubehera@users.noreply.github.com>
 Date:   Fri May 29 00:36:24 2026 -0600
 
@@ -19,13 +19,13 @@ Date:   Fri May 29 00:36:24 2026 -0600
     GB10 (sm_121a) cluster serving Qwen3.6-27B (hybrid GDN) with NEXTN k=3.
 
 diff --git a/python/sglang/srt/speculative/eagle_worker_v2.py b/python/sglang/srt/speculative/eagle_worker_v2.py
-index 8f406ad56..afe0d6b25 100644
+index 86af77e7d..6bc6c7a79 100644
 --- a/python/sglang/srt/speculative/eagle_worker_v2.py
 +++ b/python/sglang/srt/speculative/eagle_worker_v2.py
-@@ -329,13 +329,45 @@ class EagleDraftWorker(BaseDraftWorker):
-             or isinstance(self.draft_extend_attn_backend, TRTLLMMLABackend)
-             or isinstance(self.draft_extend_attn_backend, TokenspeedMLABackend)
-         )
+@@ -421,13 +421,45 @@ class EagleDraftWorker(EagleDraftWorkerBase):
+         supports_cuda_draft_extend_graph = (
+             _is_cuda or _is_musa
+         ) and graph_supported_backend
 +        build_draft_extend_graph = bool(
 +            self.draft_extend_attn_backend
 +            and (
