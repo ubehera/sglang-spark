@@ -1,0 +1,45 @@
+From afe6c835cf69b803ac7b964f7e93abe47072e28b Mon Sep 17 00:00:00 2001
+From: ubehera <ubehera@users.noreply.github.com>
+Date: Fri, 26 Jun 2026 19:54:36 +0000
+Subject: [PATCH] Fix cuda_graph_custom_mask undersize overflowing on
+ long-context spec verify
+
+init_cuda_graph_state sizes cuda_graph_custom_mask as
+max_num_tokens * max_context_len, but _update_target_verify_buffers builds the
+TARGET_VERIFY mask with length num_draft_tokens * (seq_len + num_draft_tokens)
+(seq_mask_len). The +num_draft_tokens term is unaccounted for, so at
+seq_len == max_context_len the mask exceeds the buffer by
+max_num_tokens * num_draft_tokens, raising a tensor-size RuntimeError in the
+EAGLE verify cuda-graph path on long context.
+
+Size the buffer as max_num_tokens * (max_context_len + (num_draft_tokens or 0)),
+matching seq_mask_len; (... or 0) keeps it unchanged when spec decoding is off.
+The buffer is a small uint8 allocation, so the extra columns are negligible.
+
+Signed-off-by: ubehera <ubehera@users.noreply.github.com>
+---
+ python/sglang/srt/layers/attention/triton_backend.py | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
+index fa765787a8..1ae84183fd 100644
+--- a/python/sglang/srt/layers/attention/triton_backend.py
++++ b/python/sglang/srt/layers/attention/triton_backend.py
+@@ -928,7 +928,13 @@ class TritonAttnBackend(AttentionBackend):
+ 
+         if not self.skip_prefill:
+             self.cuda_graph_custom_mask = torch.zeros(
+-                (max_num_tokens * self.max_context_len),
++                # The TARGET_VERIFY mask length is
++                # num_draft_tokens * (seq_len + num_draft_tokens) (see
++                # _update_target_verify_buffers seq_mask_len), so the capture-time
++                # buffer must include the +num_draft_tokens term or it overflows by
++                # max_num_tokens * num_draft_tokens at seq_len == max_context_len.
++                # (... or 0) leaves the size unchanged when spec decoding is off.
++                (max_num_tokens * (self.max_context_len + (self.num_draft_tokens or 0))),
+                 dtype=torch.uint8,
+                 device=self.device,
+             )
+-- 
+2.43.0
+

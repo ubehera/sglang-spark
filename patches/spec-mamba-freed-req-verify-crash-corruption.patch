@@ -1,0 +1,106 @@
+From b43dbcf99cebf562a7ce246d03d454dfcd4a1921 Mon Sep 17 00:00:00 2001
+From: ubehera <ubehera@users.noreply.github.com>
+Date: Fri, 26 Jun 2026 19:54:36 +0000
+Subject: [PATCH] Fix spec-decode crash and mamba-state corruption from freed
+ reqs in TARGET_VERIFY
+
+Under the overlap scheduler, a request that finished or was retracted has its
+mamba state freed (free_mamba_cache / reset_for_retract null mamba_next_track_idx)
+yet can still appear in the next TARGET_VERIFY batch for one iteration (result
+lag). With the mamba radix cache (extra_buffer) + EAGLE/NEXTN speculative decode
+on hybrid models (e.g. Qwen3.5) this causes two problems:
+
+1. Crash: set_mamba_track_indices_from_reqs builds an int64 tensor from
+   [req.mamba_next_track_idx ...]; the None raises
+   "TypeError: 'NoneType' object cannot be interpreted as an integer".
+   (Reported in #27325, #28312, #28407, #28484.)
+
+2. Silent corruption: defaulting the index to 0 (as in #27324 and #27998) makes
+   the post-verify commit scatter write that freed request's stale verify state
+   into a stale-but-in-range pool slot, which under concurrent churn may already
+   be re-allocated to a live request -> corrupted recurrent state, no crash.
+
+This excludes freed rows from the commit instead of defaulting them:
+- set_mamba_track_indices_from_reqs gathers with a safe in-range index for None
+  rows, then marks their output track index -1 so the track scatter skips them
+  (dst<0 guard).
+- update_mamba_state_after_mtp_verify clamps last_correct_step_indices to -1 for
+  those rows so the first (non-track) commit scatter also skips them (step<0
+  guard).
+Both scatter kernels already early-return on step<0 / dst<0. Live requests are
+byte-identical. Validated on Qwen3.5-27B hybrid + NEXTN under sustained 16-way
+churn: no crash, deterministic output, factual correctness preserved.
+
+Signed-off-by: ubehera <ubehera@users.noreply.github.com>
+---
+ .../attention/hybrid_linear_attn_backend.py     | 16 ++++++++++++++++
+ python/sglang/srt/managers/schedule_batch.py    | 17 ++++++++++++++++-
+ 2 files changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py b/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py
+index 57100a9b9d..cc95872377 100644
+--- a/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py
++++ b/python/sglang/srt/layers/attention/hybrid_linear_attn_backend.py
+@@ -1161,6 +1161,22 @@ class HybridLinearAttnBackend(AttentionBackend):
+         """
+         request_number = last_correct_step_indices.shape[0]
+ 
++        # Freed/lingering rows (flagged with mamba_track_indices < 0 by
++        # set_mamba_track_indices_from_reqs) must also be excluded from the first
++        # (non-track) commit scatter below, which keys off state_indices_tensor +
++        # last_correct_step_indices and never reads mamba_track_indices. For a freed
++        # row last_correct_step_indices is >= 0 and state_indices_tensor is a
++        # stale-but-in-range slot, so without this the scatter would write a freed
++        # request's stale verify state into a slot that may have been re-allocated to
++        # a live request. Clamp the commit step to -1 so the kernel's step<0 guard
++        # drops these rows from both commit scatters.
++        if mamba_track_indices is not None:
++            last_correct_step_indices = torch.where(
++                mamba_track_indices[:request_number] < 0,
++                torch.full_like(last_correct_step_indices, -1),
++                last_correct_step_indices,
++            )
++
+         state_indices_tensor = (
+             self.linear_attn_backend.forward_metadata.mamba_cache_indices[
+                 :request_number
+diff --git a/python/sglang/srt/managers/schedule_batch.py b/python/sglang/srt/managers/schedule_batch.py
+index 65348246cf..1741fe6b29 100755
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ -1568,9 +1568,20 @@ def set_mamba_track_indices_from_reqs(batch):
+     all_buffers = req_to_token_pool.req_index_to_mamba_ping_pong_track_buffer_mapping[
+         batch.req_pool_indices
+     ]  # (bs, ping_pong_size), int64, on device
++    # A finished/retracted request whose mamba state was already freed
++    # (free_mamba_cache / reset_for_retract null mamba_next_track_idx) can still be
++    # present in a TARGET_VERIFY batch for one iteration under the overlap
++    # scheduler's result lag. Building the int64 gather index from a None raises.
++    # Use a safe in-range gather index (0) for those rows, then mark their OUTPUT
++    # track index -1 so the track scatter skips them via its dst<0 guard, instead
++    # of committing a stale row into a live cache slot.
++    next_track_idx = [req.mamba_next_track_idx for req in batch.reqs]
++    none_rows = [i for i, v in enumerate(next_track_idx) if v is None]
++    for i in none_rows:
++        next_track_idx[i] = 0
+     idx = (
+         torch.tensor(
+-            [req.mamba_next_track_idx for req in batch.reqs],
++            next_track_idx,
+             dtype=torch.int64,
+             pin_memory=True,
+         )
+@@ -1580,6 +1591,10 @@ def set_mamba_track_indices_from_reqs(batch):
+     batch.mamba_track_indices = (
+         torch.gather(all_buffers, 1, idx).squeeze(1).to(torch.int64)
+     )
++    if none_rows:
++        batch.mamba_track_indices[
++            torch.tensor(none_rows, dtype=torch.int64, device=all_buffers.device)
++        ] = -1
+ 
+ 
+ def release_req(
+-- 
+2.43.0
+

@@ -126,3 +126,25 @@ done
 ```
 
 If a patch fails to apply against a newer upstream HEAD, the patch needs rebasing. Open an issue with the failure output.
+
+## `spec-mamba-freed-req-verify-crash-corruption.patch`
+
+**Apply when:** Running EAGLE/NEXTN speculative decode + mamba radix cache (`--mamba-scheduler-strategy extra_buffer`) on a hybrid model (Qwen3.5 / 3.6) with the overlap scheduler. Upstream-generic, NOT GB10-specific.
+
+**Apply command:**
+```
+git apply /path/to/sglang-spark/patches/spec-mamba-freed-req-verify-crash-corruption.patch
+```
+
+Fixes two bugs from a finished/retracted request whose mamba state was freed but lingers in a `TARGET_VERIFY` batch one iteration (overlap result lag): (1) the `set_mamba_track_indices_from_reqs` `NoneType` crash, and (2) the silent mamba recurrent-state corruption the freed row would cause in the post-verify commit scatters. Excludes freed rows from both the track and commit scatters via the kernel `dst<0`/`step<0` guards (NOT the unsafe `else 0` default). **Upstream: [sgl-project/sglang#29449](https://github.com/sgl-project/sglang/pull/29449) (open).** Crash tracked in #27325/#28312/#28407/#28484; supersedes the `else 0` guards in #27324/#27998. Remove this patch once #29449 merges.
+
+## `cudagraph-custom-mask-spec-verify-sizing.patch`
+
+**Apply when:** Running EAGLE/NEXTN speculative decode at long context. Upstream-generic.
+
+**Apply command:**
+```
+git apply /path/to/sglang-spark/patches/cudagraph-custom-mask-spec-verify-sizing.patch
+```
+
+Sizes `cuda_graph_custom_mask` to `max_num_tokens * (max_context_len + num_draft_tokens)` so it includes the `+num_draft_tokens` term of the verify mask `seq_mask_len` (otherwise it overflows by `max_num_tokens * num_draft_tokens` at `seq_len == max_context_len`). No change when spec is off. **Upstream: [sgl-project/sglang#29450](https://github.com/sgl-project/sglang/pull/29450) (open).** Remove once #29450 merges.
